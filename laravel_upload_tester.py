@@ -22,6 +22,7 @@ class LaravelUploadTester:
         self.local_path = tk.StringVar()
         self.selected_file = None
         self.found_endpoints = []
+        self.results = []
 
         self.setup_ui()
 
@@ -104,6 +105,11 @@ class LaravelUploadTester:
         self.result_text.configure(yscrollcommand=scrollbar.set)
         self.result_text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        self.summary_label = ttk.Label(result_frame, text="")
+        self.summary_label.pack(pady=5)
+
+        ttk.Button(result_frame, text="Export Report", command=self.export_report).pack(pady=5)
 
         # === Start Button ===
         ttk.Button(self.testing_tab, text="Start Testing", command=self.start_testing).pack(pady=10)
@@ -228,6 +234,7 @@ class LaravelUploadTester:
         base_url = self.server_url.get().rstrip("/")
         self.log(f"File: {os.path.basename(self.selected_file)}")
         self.log("-" * 60)
+        self.results = []
 
         if self.mode.get() == "local" and self.found_endpoints:
             for endpoint in self.found_endpoints:
@@ -249,6 +256,9 @@ class LaravelUploadTester:
             else:
                 self.test_traversal(url)
 
+        self.display_results()
+        self.generate_summary()
+
     def test_extensions(self, url):
         with open(self.selected_file, "rb") as f:
             original_data = f.read()
@@ -258,9 +268,21 @@ class LaravelUploadTester:
             files = {'file': (filename, original_data, 'application/octet-stream')}
             try:
                 resp = requests.post(url, files=files, timeout=10)
-                self.log(f"[{resp.status_code}] {filename} → {self.extract_message(resp.text)}")
+                self.results.append({
+                    'endpoint': url,
+                    'filename': filename,
+                    'status': resp.status_code,
+                    'message': self.extract_message(resp.text),
+                    'type': 'extension'
+                })
             except Exception as e:
-                self.log(f"[ERROR] {filename} → {e}")
+                self.results.append({
+                    'endpoint': url,
+                    'filename': filename,
+                    'status': 'ERROR',
+                    'message': str(e),
+                    'type': 'extension'
+                })
 
     def test_traversal(self, url):
         with open(self.selected_file, "rb") as f:
@@ -271,11 +293,74 @@ class LaravelUploadTester:
             try:
                 resp = requests.post(url, files=files, timeout=10)
                 saved_name = self.extract_saved_name(resp.text)
-                self.log(f"[{resp.status_code}] {payload} → {saved_name or 'No save info'}")
-                if resp.status_code == 200 and ("success" in resp.text.lower() or saved_name):
-                    self.log("   ⚠️ POSSIBLE TRAVERSAL SUCCESS!")
+                possible_success = resp.status_code == 200 and ("success" in resp.text.lower() or saved_name)
+                self.results.append({
+                    'endpoint': url,
+                    'filename': payload,
+                    'status': resp.status_code,
+                    'message': saved_name or 'No save info',
+                    'saved_name': saved_name,
+                    'possible_success': possible_success,
+                    'type': 'traversal'
+                })
             except Exception as e:
-                self.log(f"[ERROR] {payload} → {e}")
+                self.results.append({
+                    'endpoint': url,
+                    'filename': payload,
+                    'status': 'ERROR',
+                    'message': str(e),
+                    'type': 'traversal'
+                })
+
+    def display_results(self):
+        for result in self.results:
+            if result['type'] == 'extension':
+                self.log(f"[{result['status']}] {result['filename']} → {result['message']}")
+            elif result['type'] == 'traversal':
+                self.log(f"[{result['status']}] {result['filename']} → {result['message']}")
+                if result.get('possible_success'):
+                    self.log("   ⚠️ POSSIBLE TRAVERSAL SUCCESS!")
+
+    def generate_summary(self):
+        total = len(self.results)
+        successes = sum(1 for r in self.results if r['status'] == 200 and ('success' in r.get('message', '').lower() or r.get('possible_success', False)))
+        errors = sum(1 for r in self.results if r['status'] == 'ERROR')
+        self.log(f"\nSummary: Total tests: {total}, Successful uploads: {successes}, Errors: {errors}")
+        self.summary_label.config(text=f"Total: {total}, Successes: {successes}, Errors: {errors}")
+
+    def export_report(self):
+        if not self.results:
+            messagebox.showinfo("Info", "No results to export")
+            return
+        file = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv"), ("Text files", "*.txt")])
+        if file:
+            if file.endswith('.json'):
+                import json
+                with open(file, 'w') as f:
+                    json.dump(self.results, f, indent=4)
+            elif file.endswith('.csv'):
+                import csv
+                if self.results:
+                    fieldnames = self.results[0].keys()
+                    with open(file, 'w', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(self.results)
+            elif file.endswith('.txt'):
+                with open(file, 'w') as f:
+                    f.write("Test Results\n")
+                    f.write("-" * 50 + "\n")
+                    for result in self.results:
+                        f.write(f"Endpoint: {result['endpoint']}\n")
+                        f.write(f"Filename: {result['filename']}\n")
+                        f.write(f"Status: {result['status']}\n")
+                        f.write(f"Message: {result['message']}\n")
+                        if result.get('saved_name'):
+                            f.write(f"Saved Name: {result['saved_name']}\n")
+                        if result.get('possible_success'):
+                            f.write("Possible Traversal Success: Yes\n")
+                        f.write("\n")
+            messagebox.showinfo("Success", f"Report exported to {file}")
 
     def extract_message(self, text):
         m = re.search(r'"message":"([^"]+)"', text)
